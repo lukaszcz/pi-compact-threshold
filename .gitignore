@@ -1,0 +1,19 @@
+# Sandbox artifacts (character-device nodes created by the dev sandbox)
+.bash_profile
+.bashrc
+.env
+.gitconfig
+.gitmodules
+.idea
+.mcp.json
+.profile
+.ripgreprc
+.vscode
+.zprofile
+.zshrc
+.claude/
+
+# Node / build
+node_modules/
+dist/
+*.log

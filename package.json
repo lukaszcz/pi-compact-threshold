@@ -1,0 +1,17 @@
+{
+  "name": "pi-compact",
+  "version": "0.1.0",
+  "description": "Pi extension: per-model absolute-token compaction threshold.",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./extensions/compact-threshold.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  }
+}
