@@ -2,7 +2,8 @@
  * compact-threshold
  * -----------------
  * Trigger compaction at an **absolute token count** (independent of the model's
- * context window), configurable **per-model**.
+ * context window), configurable **per-model**, with **auto-resume** after
+ * mid-loop compaction.
  *
  * Configuration (merged in this order, later wins):
  *   1. `~/.pi/agent/settings.json`   (global)
@@ -231,12 +232,14 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * Mirrors the built-in `_checkCompaction()` logic so we decide at the same
-	 * point in the lifecycle the built-in does (after `agent_end`), using the
-	 * same usage source and the same guards.
+	 * Check whether compaction should fire based on the current token usage
+	 * and the configured threshold.
 	 *
-	 * `lastAssistant` is the last assistant message from the finished agent run.
-	 * It may be undefined (e.g. agent_end with no assistant response).
+	 * `lastAssistant` is the assistant message from the finished turn.
+	 * It may be undefined (e.g. turn_end with no assistant response).
+	 *
+	 * When `resume` is true, a follow-up user message is sent after compaction
+	 * completes to automatically continue the agent's in-progress work.
 	 */
 	function maybeCompact(
 		ctx: ExtensionContext,
@@ -250,6 +253,7 @@ export default function (pi: ExtensionAPI) {
 					usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens?: number };
 			  }
 			| undefined,
+		resume: boolean,
 	): void {
 		if (!effective.enabled || compacting) return;
 		const key = modelKey(ctx.model);
@@ -277,7 +281,7 @@ export default function (pi: ExtensionAPI) {
 
 		// Guard 2: skip if the assistant message predates the latest compaction
 		// entry on the current branch. Without this we'd re-fire on the very next
-		// agent_end using stale pre-compaction usage. This mirrors the built-in's
+		// turn_end using stale pre-compaction usage. This mirrors the built-in's
 		// `assistantIsFromBeforeCompaction` check.
 		const latestCompaction = getLatestCompactionEntry(ctx.sessionManager.getBranch());
 		if (
@@ -291,7 +295,7 @@ export default function (pi: ExtensionAPI) {
 
 		// Guard 3: if the assistant message is from a *different* model than the
 		// currently-selected one (e.g. user just switched mid-session), usage
-		// reflects the old model. Skip this turn; the next agent_end on the new
+		// reflects the old model. Skip this turn; the next turn_end on the new
 		// model will make an honest decision.
 		if (
 			lastAssistant &&
@@ -302,8 +306,8 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// Edge-triggered: only fire when we *cross* the threshold between agent
-		// runs. On first check (previousTokens === null), fire only if already past.
+		// Edge-triggered: only fire when we *cross* the threshold between
+		// turns. On first check (previousTokens === null), fire only if already past.
 		const wasUnder = previousTokens === null ? true : previousTokens <= threshold;
 		const nowOver = currentTokens > threshold;
 		previousTokens = currentTokens;
@@ -318,31 +322,25 @@ export default function (pi: ExtensionAPI) {
 			);
 		}
 		ctx.compact({
+			customInstructions: resume
+				? "Focus on the in-progress task and what remains to be done."
+				: undefined,
 			onComplete: () => {
 				compacting = false;
 				// Reset baseline so the post-compaction state is "below threshold"
-				// until usage from a fresh agent_end says otherwise.
+				// until usage from a fresh turn_end says otherwise.
 				previousTokens = null;
 				if (ctx.hasUI) ctx.ui.notify("Compaction complete", "info");
 				updateStatus(ctx);
+				if (resume) {
+					pi.sendUserMessage("Continue what you were doing.");
+				}
 			},
 			onError: (error) => {
 				compacting = false;
 				if (ctx.hasUI) ctx.ui.notify(`Compaction failed: ${error.message}`, "error");
 			},
 		});
-	}
-
-	/** Scan backwards for the last assistant message in a message list. */
-	function findLastAssistant(
-		messages: ReadonlyArray<{ role: string }> | undefined,
-	): Parameters<typeof maybeCompact>[1] {
-		if (!messages) return undefined;
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const m = messages[i];
-			if (m.role === "assistant") return m as Parameters<typeof maybeCompact>[1];
-		}
-		return undefined;
 	}
 
 	// --- File watchers: live reload config on edit ----------------------------
@@ -405,17 +403,21 @@ export default function (pi: ExtensionAPI) {
 		updateStatus(ctx);
 	});
 
-	// `turn_end` — cheap footer refresh only. Compaction decision lives in
-	// `agent_end` (mirrors built-in _checkCompaction timing).
-	pi.on("turn_end", (_event, ctx) => {
+	// `turn_end` — compaction decision point. Compacts on the rising edge
+	// whenever the threshold is exceeded. Auto-resume (sending a follow-up
+	// message) only happens when the agent is mid-loop (stopReason is
+	// tool_use), since there's nothing to continue if the agent has finished.
+	pi.on("turn_end", (event, ctx) => {
+		const lastAssistant = event.message as Parameters<typeof maybeCompact>[1] | undefined;
+		const isMidLoop = lastAssistant?.stopReason === "tool_use";
+		maybeCompact(ctx, lastAssistant, isMidLoop);
 		updateStatus(ctx);
 	});
 
-	// `agent_end` — same trigger point the built-in auto-compaction uses.
-	// Fires once per user prompt, after retries and tool-call loops finish.
-	pi.on("agent_end", (event, ctx) => {
-		const lastAssistant = findLastAssistant(event.messages);
-		maybeCompact(ctx, lastAssistant);
+	// `agent_end` — status update only. Compaction decisions happen at
+	// `turn_end`; by the time the agent loop finishes, any compaction has
+	// already been handled.
+	pi.on("agent_end", (_event, ctx) => {
 		updateStatus(ctx);
 	});
 

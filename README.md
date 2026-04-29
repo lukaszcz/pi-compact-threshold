@@ -2,7 +2,8 @@
 
 A [pi](https://pi.dev) extension that triggers compaction at an **absolute
 token count** — independent of the active model's context window — with
-**per-model thresholds** and live reconfiguration from inside pi.
+**per-model thresholds**, **auto-resume** after mid-loop compaction, and
+live reconfiguration from inside pi.
 
 ## Why
 
@@ -23,6 +24,9 @@ context window.
 - Live reload: edits to either settings file take effect without restarting pi.
 - Edge-triggered: compaction fires exactly once when you cross the threshold,
   not in a tight loop.
+- Mid-loop compaction with auto-resume: compacts between turns while the
+  agent is still working, then sends a follow-up message so the LLM continues
+  the task automatically.
 - Footer status readout (`compact-threshold: 83k / 150k`).
 
 ## Install
@@ -102,15 +106,23 @@ Examples:
 
 ## How it works
 
-- Subscribes to `agent_end` — the same lifecycle point pi's built-in
-  auto-compaction uses (`_checkCompaction`). Fires once per user prompt, after
-  retries and tool-call loops have finished, never mid-loop.
-- Reads `usage` directly from the last assistant message of the finished agent
-  run (via the exported `calculateContextTokens`), falling back to
+- Subscribes to `turn_end` — fired after each LLM response within the agent
+  loop. Compacts on the rising edge whenever the threshold is exceeded.
+  Auto-resume (sending a follow-up message to continue the task) only
+  happens when the agent is **mid-loop** (the LLM's `stopReason` is `tool_use`).
+  When the agent has finished (`end_turn`), compaction still fires but no
+  resume message is sent — there's nothing to continue.
+- Reads `usage` directly from the assistant message of the finished turn
+  (via the exported `calculateContextTokens`), falling back to
   `ctx.getContextUsage()` if usage is missing.
-- Fires `ctx.compact()` on the **rising edge** — i.e., the previous agent run
+- Fires `ctx.compact()` on the **rising edge** — i.e., the previous turn
   was at or below the threshold and this one is above it. That prevents
-  re-triggering while a compaction is in flight or if usage flaps across runs.
+  re-triggering while a compaction is in flight or if usage flaps across turns.
+- After compaction completes, sends a `sendUserMessage("Continue what you were doing.")` follow-up
+  so the agent automatically resumes the in-progress task with the freshly
+  compacted context.
+- Passes `customInstructions` to compaction ("Focus on the in-progress task
+  and what remains to be done.") so the summary preserves task continuity.
 - Mirrors the built-in's guards:
   - Skips when `stopReason === "aborted"` (user hit Esc).
   - Skips when the assistant message predates the latest `CompactionEntry` on
@@ -118,22 +130,22 @@ Examples:
     the exported `getLatestCompactionEntry`.
   - Skips when the assistant message came from a different model than the
     currently selected one (usage reflects the wrong model).
-- `turn_end` is used only to refresh the footer status display — no compaction
-  decisions happen there.
+- `agent_end` is used only to refresh the footer status display — compaction
+  decisions happen at `turn_end`.
 - `model_select` resets the edge-tracker so switching models applies the new
-  threshold from the next agent run.
+  threshold from the next turn.
 - `fs.watch` is attached to both settings files; config is re-merged whenever
   either changes.
 
 ## Interaction with built-in compaction
 
-Both triggers run at the same lifecycle point (`agent_end`), not in parallel
-loops. Our `agent_end` handler runs before pi's own `_checkCompaction()`, and
-pi's compaction pipeline internally guards against running a second compaction
-while one is already active (`isCompacting`). So if this extension fires, the
-built-in's same-turn check becomes a no-op. If the built-in fires (e.g. because
-your threshold was higher than `contextWindow - reserveTokens`), the built-in
-wins and this extension won't re-trigger on the same turn.
+This extension fires at `turn_end` (mid-loop), which is earlier than pi's
+built-in `_checkCompaction()` at `agent_end`. Pi's compaction pipeline
+internally guards against running a second compaction while one is already
+active (`isCompacting`). So if this extension fires mid-loop, the built-in's
+end-of-loop check is a no-op. If the agent finishes before crossing your
+threshold, the built-in may still fire at `agent_end` based on its own
+`contextWindow - reserveTokens` check.
 
 In practice: set your per-model threshold **below** `contextWindow -
 reserveTokens` for the models you care about, and this extension becomes the
