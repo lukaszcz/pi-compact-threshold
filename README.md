@@ -102,25 +102,43 @@ Examples:
 
 ## How it works
 
-- Subscribes to `turn_end`. After every assistant turn it reads
-  `ctx.getContextUsage().tokens` and compares to the effective threshold for
-  `ctx.model.provider/ctx.model.id`.
-- Fires `ctx.compact()` on the **rising edge** — i.e., the previous turn was at
-  or below the threshold and this turn is above it. That prevents re-triggering
-  while pi is already compacting or if usage flaps slightly across turns.
-- After each compaction, the reference token count is refreshed so the next
-  edge is detected from the post-compaction state.
+- Subscribes to `agent_end` — the same lifecycle point pi's built-in
+  auto-compaction uses (`_checkCompaction`). Fires once per user prompt, after
+  retries and tool-call loops have finished, never mid-loop.
+- Reads `usage` directly from the last assistant message of the finished agent
+  run (via the exported `calculateContextTokens`), falling back to
+  `ctx.getContextUsage()` if usage is missing.
+- Fires `ctx.compact()` on the **rising edge** — i.e., the previous agent run
+  was at or below the threshold and this one is above it. That prevents
+  re-triggering while a compaction is in flight or if usage flaps across runs.
+- Mirrors the built-in's guards:
+  - Skips when `stopReason === "aborted"` (user hit Esc).
+  - Skips when the assistant message predates the latest `CompactionEntry` on
+    the current branch (would use stale pre-compaction usage otherwise). Uses
+    the exported `getLatestCompactionEntry`.
+  - Skips when the assistant message came from a different model than the
+    currently selected one (usage reflects the wrong model).
+- `turn_end` is used only to refresh the footer status display — no compaction
+  decisions happen there.
 - `model_select` resets the edge-tracker so switching models applies the new
-  threshold immediately.
+  threshold from the next agent run.
 - `fs.watch` is attached to both settings files; config is re-merged whenever
   either changes.
 
 ## Interaction with built-in compaction
 
-Pi's built-in auto-compaction still runs based on `compaction.reserveTokens`.
-This extension triggers **additionally**, earlier. If you want this extension
-to be the only trigger, keep your thresholds below the built-in cutoff for
-that model.
+Both triggers run at the same lifecycle point (`agent_end`), not in parallel
+loops. Our `agent_end` handler runs before pi's own `_checkCompaction()`, and
+pi's compaction pipeline internally guards against running a second compaction
+while one is already active (`isCompacting`). So if this extension fires, the
+built-in's same-turn check becomes a no-op. If the built-in fires (e.g. because
+your threshold was higher than `contextWindow - reserveTokens`), the built-in
+wins and this extension won't re-trigger on the same turn.
+
+In practice: set your per-model threshold **below** `contextWindow -
+reserveTokens` for the models you care about, and this extension becomes the
+effective trigger. The built-in stays as a safety net for overflow errors and
+models without a configured threshold.
 
 ## Development
 
