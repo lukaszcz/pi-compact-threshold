@@ -106,14 +106,20 @@ Examples:
 
 ## How it works
 
-- Subscribes to `turn_end` — fired after each LLM response within the agent
-  loop. Compacts on the rising edge whenever the threshold is exceeded.
-  When the agent is **mid-loop** (the LLM's `stopReason` is `tool_use`), aborts
-  the agent immediately via `ctx.abort()` to prevent a race where the agent
-  starts the next turn before compaction can stop it, then sends a follow-up
-  message after compaction to continue the task automatically.
-  When the agent has finished (`end_turn`), compaction still fires but no
-  abort or resume is needed.
+- Subscribes to `agent_end` — the same lifecycle point pi's built-in
+  auto-compaction uses. Fires once per user prompt, after the entire
+  agent loop (all turns, tool calls, retries) has finished.
+- If the threshold was exceeded during the completed agent run and the
+  last assistant message had `stopReason === "tool_use"` (the LLM was
+  actively working and calling tools), compacts and then sends a
+  `"Continue what you were doing."` follow-up to automatically resume
+  the task.
+- If the agent finished normally (`end_turn`), compacts without resume —
+  there's nothing to continue.
+- Compaction does NOT happen at `turn_end` (mid-loop) because `turn_end`
+  handlers return before the agent loop decides whether to continue, and
+  `ctx.compact()` is fire-and-forget — there's no reliable way to stop
+  the loop mid-flight without a race that wastes an LLM call.
 - Reads `usage` directly from the assistant message of the finished turn
   (via the exported `calculateContextTokens`), falling back to
   `ctx.getContextUsage()` if usage is missing.
@@ -122,9 +128,11 @@ Examples:
   re-triggering while a compaction is in flight or if usage flaps across turns.
 - After compaction completes, sends a `sendUserMessage("Continue what you were doing.")` follow-up
   so the agent automatically resumes the in-progress task with the freshly
-  compacted context.
+  compacted context. This only happens when the last assistant message had
+  `stopReason === "tool_use"`.
 - Passes `customInstructions` to compaction ("Focus on the in-progress task
-  and what remains to be done.") so the summary preserves task continuity.
+  and what remains to be done.") when resuming, so the summary preserves
+  task continuity.
 - Mirrors the built-in's guards:
   - Skips when `stopReason === "aborted"` (user hit Esc).
   - Skips when the assistant message predates the latest `CompactionEntry` on
@@ -132,8 +140,8 @@ Examples:
     the exported `getLatestCompactionEntry`.
   - Skips when the assistant message came from a different model than the
     currently selected one (usage reflects the wrong model).
-- `agent_end` is used only to refresh the footer status display — compaction
-  decisions happen at `turn_end`.
+- `turn_end` is used only to refresh the footer status display — compaction
+  decisions happen at `agent_end` (no race with the agent loop).
 - `model_select` resets the edge-tracker so switching models applies the new
   threshold from the next turn.
 - `fs.watch` is attached to both settings files; config is re-merged whenever
@@ -141,13 +149,13 @@ Examples:
 
 ## Interaction with built-in compaction
 
-This extension fires at `turn_end` (mid-loop), which is earlier than pi's
-built-in `_checkCompaction()` at `agent_end`. Pi's compaction pipeline
-internally guards against running a second compaction while one is already
-active (`isCompacting`). So if this extension fires mid-loop, the built-in's
-end-of-loop check is a no-op. If the agent finishes before crossing your
-threshold, the built-in may still fire at `agent_end` based on its own
-`contextWindow - reserveTokens` check.
+Both triggers run at the same lifecycle point (`agent_end`). Our `agent_end`
+handler runs before pi's own `_checkCompaction()`, and pi's compaction
+pipeline internally guards against running a second compaction while one is
+already active (`isCompacting`). So if this extension fires, the built-in's
+same-turn check becomes a no-op. If the built-in fires (e.g. because your
+threshold was higher than `contextWindow - reserveTokens`), the built-in
+wins and this extension won't re-trigger on the same turn.
 
 In practice: set your per-model threshold **below** `contextWindow -
 reserveTokens` for the models you care about, and this extension becomes the
