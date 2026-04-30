@@ -429,7 +429,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// `turn_end` — mid-loop compaction. When the LLM just called tools
-	// (stopReason === "tool_use") and the threshold is exceeded, abort the
+	// (stopReason === "toolUse") and the threshold is exceeded, abort the
 	// agent and compact immediately. The abort is necessary because
 	// turn_end handlers return before the agent loop decides whether to
 	// continue — without abort, the loop could start the next LLM call
@@ -438,7 +438,7 @@ export default function (pi: ExtensionAPI) {
 	// already-aborted signal and fails immediately (no HTTP request sent).
 	pi.on("turn_end", (event, ctx) => {
 		const lastAssistant = event.message as Parameters<typeof maybeCompact>[1] | undefined;
-		if (lastAssistant?.stopReason === "tool_use") {
+		if (lastAssistant?.stopReason === "toolUse") {
 			maybeCompact(ctx, lastAssistant, /* midLoop */ true);
 		}
 		updateStatus(ctx);
@@ -454,7 +454,7 @@ export default function (pi: ExtensionAPI) {
 		// Only compact here if we didn't already fire at turn_end (i.e. the
 		// agent wasn't mid-loop, or the guard checks in maybeCompact
 		// prevented it).
-		if (lastAssistant?.stopReason !== "tool_use") {
+		if (lastAssistant?.stopReason !== "toolUse") {
 			maybeCompact(ctx, lastAssistant, /* midLoop */ false);
 		}
 		updateStatus(ctx);
