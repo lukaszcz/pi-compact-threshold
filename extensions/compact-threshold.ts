@@ -2,8 +2,8 @@
  * compact-threshold
  * -----------------
  * Trigger compaction at an **absolute token count** (independent of the model's
- * context window), configurable **per-model**, with **auto-resume** via
- * follow-up message when the agent was actively calling tools.
+ * context window), configurable **per-model**, with **mid-loop compaction**
+ * and **auto-resume** via follow-up message.
  *
  * Configuration (merged in this order, later wins):
  *   1. `~/.pi/agent/settings.json`   (global)
@@ -238,8 +238,9 @@ export default function (pi: ExtensionAPI) {
 	 * `lastAssistant` is the assistant message from the finished turn/agent run.
 	 * It may be undefined (e.g. with no assistant response).
 	 *
-	 * When `resume` is true, a follow-up user message is sent after compaction
-	 * completes to automatically continue the agent's in-progress work.
+	 * When `midLoop` is true, the agent is still in its loop and we need to
+	 * abort it before compacting (see turn_end handler comment for details),
+	 * then send a follow-up user message after compaction to resume the task.
 	 */
 	function maybeCompact(
 		ctx: ExtensionContext,
@@ -253,7 +254,7 @@ export default function (pi: ExtensionAPI) {
 					usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens?: number };
 			  }
 			| undefined,
-		resume: boolean,
+		midLoop: boolean,
 	): void {
 		if (!effective.enabled || compacting) return;
 		const key = modelKey(ctx.model);
@@ -314,6 +315,18 @@ export default function (pi: ExtensionAPI) {
 
 		if (!wasUnder || !nowOver) return;
 
+		// When mid-loop, abort the agent before compacting. turn_end handlers
+		// return before the agent loop decides whether to continue the next
+		// turn, so the loop could start the next LLM call before our compact()
+		// gets to it. ctx.abort() sets the agent's abort signal synchronously —
+		// when the loop tries streamAssistantResponse next, the signal is
+		// already aborted and the HTTP client throws immediately (no request
+		// sent, no tokens wasted). compact() then waits for the agent to
+		// become idle and proceeds normally.
+		if (midLoop) {
+			ctx.abort();
+		}
+
 		compacting = true;
 		if (ctx.hasUI) {
 			ctx.ui.notify(
@@ -322,7 +335,7 @@ export default function (pi: ExtensionAPI) {
 			);
 		}
 		ctx.compact({
-			customInstructions: resume
+			customInstructions: midLoop
 				? "Focus on the in-progress task and what remains to be done."
 				: undefined,
 			onComplete: () => {
@@ -332,7 +345,7 @@ export default function (pi: ExtensionAPI) {
 				previousTokens = null;
 				if (ctx.hasUI) ctx.ui.notify("Compaction complete", "info");
 				updateStatus(ctx);
-				if (resume) {
+				if (midLoop) {
 					pi.sendUserMessage("Continue what you were doing.");
 				}
 			},
@@ -415,27 +428,35 @@ export default function (pi: ExtensionAPI) {
 		updateStatus(ctx);
 	});
 
-	// `turn_end` — status refresh only. Compaction decisions happen at
-	// `agent_end` (after the agent loop finishes) because turn_end handlers
-	// return before the agent loop decides whether to continue the next turn —
-	// there's no reliable way to stop the loop mid-flight from a turn_end
-	// handler without a race that wastes an LLM call.
-	pi.on("turn_end", (_event, ctx) => {
+	// `turn_end` — mid-loop compaction. When the LLM just called tools
+	// (stopReason === "tool_use") and the threshold is exceeded, abort the
+	// agent and compact immediately. The abort is necessary because
+	// turn_end handlers return before the agent loop decides whether to
+	// continue — without abort, the loop could start the next LLM call
+	// before compact() stops it. ctx.abort() sets the abort signal
+	// synchronously, so the next streamAssistantResponse call sees an
+	// already-aborted signal and fails immediately (no HTTP request sent).
+	pi.on("turn_end", (event, ctx) => {
+		const lastAssistant = event.message as Parameters<typeof maybeCompact>[1] | undefined;
+		if (lastAssistant?.stopReason === "tool_use") {
+			maybeCompact(ctx, lastAssistant, /* midLoop */ true);
+		}
 		updateStatus(ctx);
 	});
 
-	// `agent_end` — compaction decision point. Fires once per user prompt
-	// after retries and tool-call loops have finished. If the threshold was
-	// exceeded during the last agent run, compact and optionally auto-resume
-	// by sending a follow-up user message.
+	// `agent_end` — end-of-loop compaction. When the agent loop finishes
+	// normally (not mid-loop), compact if the threshold was exceeded.
+	// No resume needed — the agent has already completed its task.
+	// Also catches the case where the agent wasn't calling tools when it
+	// stopped but the threshold is still exceeded.
 	pi.on("agent_end", (event, ctx) => {
 		const lastAssistant = findLastAssistant(event.messages);
-		// Auto-resume when the last assistant message was calling tools — the
-		// agent wanted to continue but the loop ended (e.g. from overflow or
-		// hitting the built-in compaction threshold). This is conservative: we
-		// only resume when there was clear intent to keep working.
-		const resume = lastAssistant?.stopReason === "tool_use";
-		maybeCompact(ctx, lastAssistant, resume);
+		// Only compact here if we didn't already fire at turn_end (i.e. the
+		// agent wasn't mid-loop, or the guard checks in maybeCompact
+		// prevented it).
+		if (lastAssistant?.stopReason !== "tool_use") {
+			maybeCompact(ctx, lastAssistant, /* midLoop */ false);
+		}
 		updateStatus(ctx);
 	});
 
