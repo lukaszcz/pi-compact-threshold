@@ -108,10 +108,12 @@ Examples:
 
 - Subscribes to `turn_end` — fired after each LLM response within the agent
   loop. Compacts on the rising edge whenever the threshold is exceeded.
-  Auto-resume (sending a follow-up message to continue the task) only
-  happens when the agent is **mid-loop** (the LLM's `stopReason` is `tool_use`).
+  When the agent is **mid-loop** (the LLM's `stopReason` is `tool_use`), aborts
+  the agent immediately via `ctx.abort()` to prevent a race where the agent
+  starts the next turn before compaction can stop it, then sends a follow-up
+  message after compaction to continue the task automatically.
   When the agent has finished (`end_turn`), compaction still fires but no
-  resume message is sent — there's nothing to continue.
+  abort or resume is needed.
 - Reads `usage` directly from the assistant message of the finished turn
   (via the exported `calculateContextTokens`), falling back to
   `ctx.getContextUsage()` if usage is missing.

@@ -238,8 +238,10 @@ export default function (pi: ExtensionAPI) {
 	 * `lastAssistant` is the assistant message from the finished turn.
 	 * It may be undefined (e.g. turn_end with no assistant response).
 	 *
-	 * When `resume` is true, a follow-up user message is sent after compaction
-	 * completes to automatically continue the agent's in-progress work.
+	 * When `resume` is true, the agent is mid-loop and we need to abort it
+	 * before compacting (to prevent a race where the agent starts the next
+	 * turn), then send a follow-up user message after compaction to continue
+	 * the in-progress task.
 	 */
 	function maybeCompact(
 		ctx: ExtensionContext,
@@ -313,6 +315,17 @@ export default function (pi: ExtensionAPI) {
 		previousTokens = currentTokens;
 
 		if (!wasUnder || !nowOver) return;
+
+		// When mid-loop, we must abort the agent *before* calling compact().
+		// turn_end handlers return before the agent loop decides whether to
+		// continue, and ctx.compact() is fire-and-forget — so without an explicit
+		// abort, the agent could start the next LLM call before compaction kills
+		// it, leaving a partial aborted response in the session. Calling
+		// ctx.abort() sets the agent's abort signal synchronously, which prevents
+		// the next turn from starting.
+		if (resume) {
+			ctx.abort();
+		}
 
 		compacting = true;
 		if (ctx.hasUI) {
