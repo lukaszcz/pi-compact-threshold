@@ -107,17 +107,19 @@ Examples:
 ## How it works
 
 - Subscribes to `turn_end` — fired after each LLM response within the
-  agent loop. When the LLM has `stopReason === "tool_use"` (calling tools,
-  mid-loop) and the threshold is exceeded, **aborts the agent immediately**
-  via `ctx.abort()`, then compacts. The abort sets the agent's abort signal
-  synchronously, so the next `streamAssistantResponse` call in the loop
-  sees an already-aborted signal and fails immediately — no HTTP request
-  is sent, no tokens wasted. After compaction, sends a follow-up
+  agent loop. If the threshold is exceeded, compacts regardless of
+  `stopReason`.
+- When the LLM just called tools (`stopReason === "toolUse"`, so the
+  agent loop is about to start another LLM call), **aborts the agent
+  immediately** via `ctx.abort()` before compacting. The abort sets the
+  agent's abort signal synchronously, so the next
+  `streamAssistantResponse` call in the loop sees an already-aborted
+  signal and fails immediately — no HTTP request is sent, no tokens
+  wasted. After compaction, sends a follow-up
   `"Continue what you were doing."` message to automatically resume.
-- Also subscribes to `agent_end` — when the loop finishes normally
-  (not mid-loop), compacts without resume if the threshold was exceeded.
-  This catches cases where the agent stopped without calling tools but
-  the context is still over the threshold.
+- For any other `stopReason` (`stop`, `error`, `aborted`, etc.) the agent
+  loop is already exiting, so we just compact in place with no abort and
+  no resume.
 - Reads `usage` directly from the assistant message of the finished turn
   (via the exported `calculateContextTokens`), falling back to
   `ctx.getContextUsage()` if usage is missing.
@@ -138,9 +140,10 @@ Examples:
     the exported `getLatestCompactionEntry`.
   - Skips when the assistant message came from a different model than the
     currently selected one (usage reflects the wrong model).
-- `turn_end` triggers mid-loop compaction (with abort + resume).
-- `agent_end` triggers end-of-loop compaction when the threshold is
-  exceeded but the agent wasn't mid-loop (no resume).
+- `turn_end` is the single compaction decision point — it fires for every
+  assistant message (including the final one) and always precedes
+  `agent_end`.
+- `agent_end` is used only to refresh the footer status display.
 - `model_select` resets the edge-tracker so switching models applies the new
   threshold from the next turn.
 - `fs.watch` is attached to both settings files; config is re-merged whenever
@@ -148,12 +151,11 @@ Examples:
 
 ## Interaction with built-in compaction
 
-Mid-loop compaction (`turn_end` + `ctx.abort()`) fires earlier than the
-built-in's `_checkCompaction()` at `agent_end`. Pi's compaction pipeline
-guards against running a second compaction while one is already active
-(`isCompacting`), so if our extension fires mid-loop, the built-in's
-end-of-loop check is a no-op. If the agent finishes before crossing your
-threshold, the built-in or our `agent_end` handler may still fire.
+This extension fires at `turn_end`, which runs earlier than pi's built-in
+`_checkCompaction()` at `agent_end`. Pi's compaction pipeline guards
+against running a second compaction while one is already active
+(`isCompacting`), so if our extension fires, the built-in's end-of-loop
+check is a no-op.
 
 In practice: set your per-model threshold **below** `contextWindow -
 reserveTokens` for the models you care about, and this extension becomes the
