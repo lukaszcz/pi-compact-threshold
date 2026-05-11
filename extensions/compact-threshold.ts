@@ -343,15 +343,25 @@ export default function (pi: ExtensionAPI) {
 				// Reset baseline so the post-compaction state is "below threshold"
 				// until usage from a fresh turn_end says otherwise.
 				previousTokens = null;
-				if (ctx.hasUI) ctx.ui.notify("Compaction complete", "info");
-				updateStatus(ctx);
-				if (midLoop) {
-					pi.sendUserMessage("Continue what you were doing.");
+				try {
+					if (ctx.hasUI) ctx.ui.notify("Compaction complete", "info");
+					updateStatus(ctx);
+					if (midLoop) {
+						pi.sendUserMessage("Continue what you were doing.");
+					}
+				} catch {
+					// ctx is stale after session replacement (newSession/fork/switchSession/
+					// reload). The old session's UI is gone — nothing to notify. Local
+					// state (compacting, previousTokens) was already reset above.
 				}
 			},
 			onError: (error) => {
 				compacting = false;
-				if (ctx.hasUI) ctx.ui.notify(`Compaction failed: ${error.message}`, "error");
+				try {
+					if (ctx.hasUI) ctx.ui.notify(`Compaction failed: ${error.message}`, "error");
+				} catch {
+					// ctx is stale after session replacement — old UI is gone.
+				}
 			},
 		});
 	}
@@ -382,18 +392,28 @@ export default function (pi: ExtensionAPI) {
 		watchFile(GLOBAL_SETTINGS, () => {
 			globalLayer = readLayerFromFile(GLOBAL_SETTINGS);
 			recompute();
-			if (ctx.hasUI) {
-				ctx.ui.notify(`compact-threshold: reloaded global settings → ${describeThreshold(ctx)}`, "info");
+			try {
+				if (ctx.hasUI) {
+					ctx.ui.notify(`compact-threshold: reloaded global settings → ${describeThreshold(ctx)}`, "info");
+				}
+				updateStatus(ctx);
+			} catch {
+				// ctx is stale after session replacement — old UI is gone.
+				// The new extension instance's session_start will call updateStatus
+				// with its own fresh ctx.
 			}
-			updateStatus(ctx);
 		});
 		watchFile(projectSettings(ctx.cwd), () => {
 			projectLayer = readLayerFromFile(projectSettings(ctx.cwd));
 			recompute();
-			if (ctx.hasUI) {
-				ctx.ui.notify(`compact-threshold: reloaded project settings → ${describeThreshold(ctx)}`, "info");
+			try {
+				if (ctx.hasUI) {
+					ctx.ui.notify(`compact-threshold: reloaded project settings → ${describeThreshold(ctx)}`, "info");
+				}
+				updateStatus(ctx);
+			} catch {
+				// ctx is stale after session replacement — old UI is gone.
 			}
-			updateStatus(ctx);
 		});
 
 		updateStatus(ctx);
