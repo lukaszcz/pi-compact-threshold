@@ -103,6 +103,13 @@ function formatTokens(n: number | null | undefined): string {
 	return `${n}`;
 }
 
+/** Pull out the optional `save`/`--save` flag and return the remaining tokens. */
+function extractSave(tokens: string[]): { save: boolean; rest: string[] } {
+	const save = tokens.some((t) => t.toLowerCase() === "save" || t === "--save");
+	const rest = tokens.filter((t) => t.toLowerCase() !== "save" && t !== "--save");
+	return { save, rest };
+}
+
 function modelKey(model: { provider?: string; id?: string } | undefined | null): string | null {
 	if (!model?.provider || !model?.id) return null;
 	return `${model.provider}/${model.id}`;
@@ -463,7 +470,7 @@ export default function (pi: ExtensionAPI) {
 
 	// --- Command --------------------------------------------------------------
 	pi.registerCommand("compact-threshold", {
-		description: "Set/show compaction token threshold (per-model, absolute)",
+		description: "Set/show compaction token threshold (per-model, absolute). Append 'save' to persist to ~/.pi/agent/settings.json.",
 		getArgumentCompletions: (prefix: string) => {
 			const items = [
 				{ value: "show", label: "show — print full config" },
@@ -472,23 +479,31 @@ export default function (pi: ExtensionAPI) {
 				{ value: "enable", label: "enable — turn on" },
 				{ value: "disable", label: "disable — turn off" },
 				{ value: "reload", label: "reload — re-read settings files" },
+				{ value: "save", label: "save — persist change to ~/.pi/agent/settings.json" },
 			];
 			const filtered = items.filter((i) => i.value.startsWith(prefix));
 			return filtered.length > 0 ? filtered : null;
 		},
 		handler: async (args, ctx) => {
 			const tokens = args.trim().split(/\s+/).filter(Boolean);
+			const { save, rest } = extractSave(tokens);
 
 			// `/compact-threshold` with no args — show effective threshold
-			if (tokens.length === 0) {
+			if (rest.length === 0) {
 				ctx.ui.notify(describeThreshold(ctx), "info");
 				return;
 			}
 
-			const cmd = tokens[0].toLowerCase();
-			const save = tokens.some((t) => t.toLowerCase() === "save" || t === "--save");
+			const cmd = rest[0].toLowerCase();
 
 			if (cmd === "show") {
+				if (rest.length > 1) {
+					ctx.ui.notify(
+						`Unexpected argument(s) after 'show': ${rest.slice(1).join(" ")}`,
+						"error",
+					);
+					return;
+				}
 				const lines: string[] = [];
 				lines.push(`enabled: ${effective.enabled}`);
 				lines.push(`default: ${formatTokens(effective.default)}`);
@@ -505,6 +520,13 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (cmd === "reload") {
+				if (rest.length > 1) {
+					ctx.ui.notify(
+						`Unexpected argument(s) after 'reload': ${rest.slice(1).join(" ")}`,
+						"error",
+					);
+					return;
+				}
 				globalLayer = readLayerFromFile(GLOBAL_SETTINGS);
 				projectLayer = readLayerFromFile(projectSettings(ctx.cwd));
 				recompute();
@@ -514,6 +536,13 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (cmd === "enable" || cmd === "disable") {
+				if (rest.length > 1) {
+					ctx.ui.notify(
+						`Unexpected argument(s) after '${cmd}': ${rest.slice(1).join(" ")}. Did you mean '${cmd} save'?`,
+						"error",
+					);
+					return;
+				}
 				const enabled = cmd === "enable";
 				sessionLayer.enabled = enabled;
 				recompute();
@@ -528,7 +557,14 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (cmd === "default") {
-				const arg = tokens[1];
+				if (rest.length > 2) {
+					ctx.ui.notify(
+						`Unexpected argument(s): ${rest.slice(2).join(" ")}. Usage: /compact-threshold default <N|off> [save]`,
+						"error",
+					);
+					return;
+				}
+				const arg = rest[1];
 				if (!arg) {
 					ctx.ui.notify(
 						`default threshold: ${formatTokens(effective.default)}. Usage: /compact-threshold default <N|off> [save]`,
@@ -554,6 +590,13 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// Otherwise: treat first token as a value for the current model.
+			if (rest.length > 1) {
+				ctx.ui.notify(
+					`Unexpected argument(s): ${rest.slice(1).join(" ")}. Usage: /compact-threshold <N|off> [save]`,
+					"error",
+				);
+				return;
+			}
 			const key = modelKey(ctx.model);
 			if (!key) {
 				ctx.ui.notify("No active model — select one with /model first.", "warning");
